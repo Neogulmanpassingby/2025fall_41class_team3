@@ -35,6 +35,15 @@ function Section({
   );
 }
 
+const formatDate = (raw?: string) => {
+  if (!raw || raw.length !== 8) return null;
+
+  const y = raw.slice(0, 4);
+  const m = raw.slice(4, 6);
+  const d = raw.slice(6, 8);
+
+  return `${y}년 ${m}월 ${d}일`;
+};
 
 export default function PolicyDetailModal({
   policy,
@@ -47,16 +56,26 @@ export default function PolicyDetailModal({
   { label: "지원내용", value: policy.plcySprtCn },
   ].filter(r => r.value);
 
-  const periodRows = [
-  { label: "신청 기간", value: policy.aplyYmd },
+ const periodRows = [
+  {
+    label: "신청 기간",
+    value: policy.aplyYmd
+      ? formatDate(policy.aplyYmd)
+      : "상시",
+  },
   {
     label: "사업 기간",
-    value:
-      policy.bizPrdBgngYmd && policy.bizPrdEndYmd
-        ? `${policy.bizPrdBgngYmd} ~ ${policy.bizPrdEndYmd}`
-        : policy.bizPrdBgngYmd,
+    value: (() => {
+      const start = formatDate(policy.bizPrdBgngYmd);
+      const end = formatDate(policy.bizPrdEndYmd);
+
+      if (start && end) return `${start} ~ ${end}`;
+      if (start) return `${start}부터`;
+      return "상시";
+    })(),
   },
-  ].filter(r => r.value);
+];
+
 
   const applyRows = [
   { label: "신청 방법", value: policy.plcyAplyMthdCn },
@@ -92,31 +111,45 @@ export default function PolicyDetailModal({
 
 
   // 2. 신청 페이지 이동 핸들러
-  const handleApplyClick = () => {
-  const aply = typeof policy.aplyUrlAddr === "string" ? policy.aplyUrlAddr.trim() : "";
-  if (aply) {
-    // 신청 사이트는 alert 없이 바로 이동
-    window.open(aply, "_blank", "noopener,noreferrer");
+  const normalizeUrl = (url?: string) => {
+  if (!url) return null;
+  const trimmed = url.trim();
+  if (!trimmed) return null;
+
+  // 이미 http/https 있으면 그대로
+  if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  // 없으면 https 붙여줌
+  return `https://${trimmed}`;
+};
+
+const handleApplyClick = () => {
+  const applyUrl = normalizeUrl(policy.aplyUrlAddr);
+  const ref1 = normalizeUrl(policy.refUrlAddr1);
+  const ref2 = normalizeUrl(policy.refUrlAddr2);
+
+  // 1) 신청 URL이 있으면 바로 이동 (알림 없음)
+  if (applyUrl) {
+    window.open(applyUrl, "_blank", "noopener,noreferrer");
     return;
   }
 
-  const ref1 = typeof policy.refUrlAddr1 === "string" ? policy.refUrlAddr1.trim() : "";
-  if (ref1) {
-    alert("참고페이지 1로 이동합니다.");
-    window.open(ref1, "_blank", "noopener,noreferrer");
+  // 2) 신청 URL이 없고 참고 URL이 있으면 알림 후 이동
+  const refUrl = ref1 || ref2;
+  if (refUrl) {
+    alert("신청 페이지 URL이 없어 참고 페이지로 이동합니다.");
+    window.open(refUrl, "_blank", "noopener,noreferrer");
     return;
   }
 
-  const ref2 = typeof policy.refUrlAddr2 === "string" ? policy.refUrlAddr2.trim() : "";
-  if (ref2) {
-    alert("참고페이지 2로 이동합니다.");
-    window.open(ref2, "_blank", "noopener,noreferrer");
-    return;
-  }
-
+  // 3) 둘 다 없으면 구글 검색
   alert("신청/참고 URL 정보가 없습니다. 구글에서 검색할게요.");
 
-  const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(policy.plcyNm)}`;
+  const googleUrl = `https://www.google.com/search?q=${encodeURIComponent(
+    policy.plcyNm
+  )}`;
   window.open(googleUrl, "_blank", "noopener,noreferrer");
 };
 
