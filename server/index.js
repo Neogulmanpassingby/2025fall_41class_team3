@@ -8,7 +8,21 @@ const mypageRouter = require('./routes/mypage');
 const app = express();
 const PORT = 3000;
 
-app.use(cors());
+const allowedOrigins = [
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
+  'http://localhost:3001',
+  'https://2025fall41classteam3.vercel.app',
+  'https://2025fall41classteam3-peach.vercel.app'
+];
+
+
+app.use(cors({
+  origin: true, // 요청 origin 그대로 반사
+  credentials: true
+}));
+
+
 app.use(express.json());
 
 app.use((req, res, next) => {
