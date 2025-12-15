@@ -6,6 +6,31 @@ interface PolicyDetailModalProps {
   onClose: () => void;
 }
 
+const formatDateSmart = (raw?: string): string => {
+  if (!raw) return "";
+
+  const trimmed = raw.trim();
+  if (!trimmed) return "";
+
+  if (trimmed.includes("~")) {
+    const [start, end] = trimmed.split("~").map(s => s.trim());
+    const s = formatDateSmart(start);
+    const e = formatDateSmart(end);
+    if (s && e) return `${s} ~ ${e}`;
+    return trimmed;
+  }
+
+  if (/^\d{8}$/.test(trimmed)) {
+    const y = trimmed.slice(0, 4);
+    const m = trimmed.slice(4, 6);
+    const d = trimmed.slice(6, 8);
+    return `${y}년 ${m}월 ${d}일`;
+  }
+
+  return trimmed;
+};
+
+
 function Section({
   title,
   rows,
@@ -35,15 +60,7 @@ function Section({
   );
 }
 
-const formatDate = (raw?: string) => {
-  if (!raw || raw.length !== 8) return null;
 
-  const y = raw.slice(0, 4);
-  const m = raw.slice(4, 6);
-  const d = raw.slice(6, 8);
-
-  return `${y}년 ${m}월 ${d}일`;
-};
 
 export default function PolicyDetailModal({
   policy,
@@ -59,15 +76,13 @@ export default function PolicyDetailModal({
  const periodRows = [
   {
     label: "신청 기간",
-    value: policy.aplyYmd
-      ? formatDate(policy.aplyYmd)
-      : "상시",
+    value: formatDateSmart(policy.aplyYmd) || "상시",
   },
   {
     label: "사업 기간",
     value: (() => {
-      const start = formatDate(policy.bizPrdBgngYmd);
-      const end = formatDate(policy.bizPrdEndYmd);
+      const start = formatDateSmart(policy.bizPrdBgngYmd);
+      const end = formatDateSmart(policy.bizPrdEndYmd);
 
       if (start && end) return `${start} ~ ${end}`;
       if (start) return `${start}부터`;
