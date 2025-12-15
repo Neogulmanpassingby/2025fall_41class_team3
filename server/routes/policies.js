@@ -24,6 +24,9 @@ const authenticate = (req, res, next) => {
   }
 };
 
+
+
+
 // 정책 검색 API
 router.get("/search", (req, res) => {
   const {
@@ -198,6 +201,60 @@ router.get("/recent", authenticate, async (req, res) => {
   }
 });
 
+router.get("/:id/summary", authenticate, async (req, res) => {
+  const policyId = req.params.id;
+
+  const [[row]] = await db.query(`
+    SELECT
+      plcyNm, plcyExplnCn, plcySprtCn, plcyAplyMthdCn,
+      aplyYmd, bizPrdBgngYmd, bizPrdEndYmd,
+      sprtTrgtMinAge, sprtTrgtMaxAge, zipCd,
+      earnEtcCn, schoolCd, jobCd, plcyMajorCd,
+      addAplyQlfcCndCn, ptcpPrpTrgtCn
+    FROM policies
+    WHERE id = ?
+  `, [policyId]);
+
+  if (!row) return res.status(404).json({ message: "정책 없음" });
+
+  const inputText = `
+정책명: ${row.plcyNm}
+정책 설명: ${row.plcyExplnCn}
+지원 내용: ${row.plcySprtCn}
+신청 방법: ${row.plcyAplyMthdCn}
+신청 기간: ${row.aplyYmd}
+사업 기간: ${row.bizPrdBgngYmd} ~ ${row.bizPrdEndYmd}
+신청 자격:
+- 연령: ${row.sprtTrgtMinAge} ~ ${row.sprtTrgtMaxAge}
+- 지역: ${row.zipCd}
+- 소득: ${row.earnEtcCn}
+- 학력: ${row.schoolCd}
+- 전공: ${row.plcyMajorCd}
+- 취업상태: ${row.jobCd}
+추가 조건: ${row.addAplyQlfcCndCn}
+참여 제한: ${row.ptcpPrpTrgtCn}
+  `.trim();
+
+  const py = spawn(
+  pythonExecutable,
+  ["policy_summary.py"],
+  {
+    cwd: path.resolve(__dirname, ".."), // 🔥 server 디렉토리
+    env: process.env,                   // 🔥 Node env 그대로 전달
+  }
+);
+
+  py.stdin.write(inputText);
+  py.stdin.end();
+
+  let out = "";
+  py.stdout.on("data", d => out += d.toString());
+
+  py.on("close", () => {
+    res.json({ summary: out.trim() });
+  });
+});
+
 // 정책 상세 조회 API
 router.get("/:id", authenticate, async (req, res) => {
   const policyId = req.params.id;
@@ -206,7 +263,7 @@ router.get("/:id", authenticate, async (req, res) => {
     const [rows] = await db.query(
       `
       SELECT
-        plcyNm, lclsfNm, mclsfNm,
+        id, plcyNm, lclsfNm, mclsfNm,
         plcyKywdNm, plcyExplnCn, plcySprtCn, plcyAplyMthdCn,
         aplyYmd, bizPrdBgngYmd, bizPrdEndYmd,
         aplyUrlAddr, srngMthdCn, sbmsnDcmntCn,
@@ -245,6 +302,7 @@ async function ensurePolicyExists(policyId) {
   );
   return !!(row && row.ok);
 }
+
 
 // 리뷰 작성 API
 router.post("/:id/reviews", authenticate, async (req, res) => {

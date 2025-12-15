@@ -7,13 +7,21 @@ const hopByHopHeaders = ["connection", "keep-alive", "proxy-authenticate", "prox
 
 function filterHeaders(headers: Headers) {
   const filtered = new Headers();
+
   headers.forEach((value, key) => {
     if (!hopByHopHeaders.includes(key.toLowerCase())) {
       filtered.set(key, value);
     }
   });
+
+  const auth = headers.get("authorization");
+  if (auth) {
+    filtered.set("authorization", auth);
+  }
+
   return filtered;
 }
+
 
 export async function proxyRequest(req: NextRequest, targetPath: string) {
   const search = req.nextUrl.search ? `?${req.nextUrl.searchParams.toString()}` : "";
