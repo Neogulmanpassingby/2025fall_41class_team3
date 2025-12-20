@@ -1,3 +1,4 @@
+import React from "react";
 import FieldRow from "@/components/common/FieldRow";
 import SelectInput from "@/components/common/SelectInput";
 import TextInput from "@/components/common/TextInput";
@@ -29,6 +30,255 @@ export default function BasicInfoSection({
   onChangeLocation,
   onChangeNickname,
 }: BasicInfoSectionProps) {
+  // Region tree (copied from signup page)
+  const REGION_TREE: Record<string, Record<string, string[]>> = {
+    '서울특별시': {
+      '종로구': [],
+      '중구': [],
+      '용산구': [],
+      '성동구': [],
+      '광진구': [],
+      '동대문구': [],
+      '중랑구': [],
+      '성북구': [],
+      '강북구': [],
+      '도봉구': [],
+      '노원구': [],
+      '은평구': [],
+      '서대문구': [],
+      '마포구': [],
+      '양천구': [],
+      '강서구': [],
+      '구로구': [],
+      '금천구': [],
+      '영등포구': [],
+      '동작구': [],
+      '관악구': [],
+      '서초구': [],
+      '강남구': [],
+      '송파구': [],
+      '강동구': [],
+    },
+    '부산광역시': {
+      '중구': [],
+      '서구': [],
+      '동구': [],
+      '영도구': [],
+      '부산진구': [],
+      '동래구': [],
+      '남구': [],
+      '북구': [],
+      '해운대구': [],
+      '사하구': [],
+      '금정구': [],
+      '강서구': [],
+      '연제구': [],
+      '수영구': [],
+      '사상구': [],
+      '기장군': [],
+    },
+    '대구광역시': {
+      '중구': [],
+      '동구': [],
+      '서구': [],
+      '남구': [],
+      '북구': [],
+      '수성구': [],
+      '달서구': [],
+      '달성군': [],
+    },
+    '인천광역시': {
+      '중구': [],
+      '동구': [],
+      '미추홀구': [],
+      '연수구': [],
+      '남동구': [],
+      '부평구': [],
+      '계양구': [],
+      '서구': [],
+      '강화군': [],
+      '옹진군': [],
+    },
+    '광주광역시': {
+      '동구': [],
+      '서구': [],
+      '남구': [],
+      '북구': [],
+    },
+    '대전광역시': {
+      '동구': [],
+      '중구': [],
+      '서구': [],
+      '유성구': [],
+      '대덕구': [],
+    },
+    '울산광역시': {
+      '중구': [],
+      '남구': [],
+      '동구': [],
+      '북구': [],
+      '울주군': [],
+    },
+    '세종특별자치시': {
+      '세종특별자치시': [],
+    },
+    '경기도': {
+      '수원시': [],
+      '성남시': [],
+      '안양시': [],
+      '안산시': [],
+      '고양시': [],
+      '용인시': [],
+      '부천시': [],
+      '의정부시': [],
+      '시흥시': [],
+      '평택시': [],
+      '안성시': [],
+      '김포시': [],
+      '화성시': [],
+      '광명시': [],
+      '군포시': [],
+      '의왕시': [],
+      '하남시': [],
+      '오산시': [],
+      '파주시': [],
+      '이천시': [],
+      '양평군': [],
+      '여주시': [],
+    },
+    '강원도': {
+      '춘천시': [],
+      '원주시': [],
+      '강릉시': [],
+      '동해시': [],
+      '태백시': [],
+      '속초시': [],
+      '삼척시': [],
+      '홍천군': [],
+      '횡성군': [],
+      '영월군': [],
+      '정선군': [],
+      '평창군': [],
+      '철원군': [],
+      '화천군': [],
+      '양구군': [],
+      '인제군': [],
+      '고성군': [],
+      '양양군': [],
+    },
+    '충청북도': {
+      '청주시': [],
+      '충주시': [],
+      '제천시': [],
+      '보은군': [],
+      '옥천군': [],
+      '영동군': [],
+      '증평군': [],
+      '진천군': [],
+      '괴산군': [],
+      '음성군': [],
+    },
+    '충청남도': {
+      '천안시': [],
+      '공주시': [],
+      '보령시': [],
+      '아산시': [],
+      '서산시': [],
+      '논산시': [],
+      '계룡시': [],
+      '당진시': [],
+      '금산군': [],
+      '부여군': [],
+      '서천군': [],
+      '청양군': [],
+      '홍성군': [],
+      '예산군': [],
+    },
+    '전라북도': {
+      '전주시': [],
+      '군산시': [],
+      '익산시': [],
+      '정읍시': [],
+      '남원시': [],
+      '김제시': [],
+      '완주군': [],
+      '진안군': [],
+      '무주군': [],
+      '장수군': [],
+    },
+    '전라남도': {
+      '목포시': [],
+      '여수시': [],
+      '순천시': [],
+      '나주시': [],
+      '광양시': [],
+      '무안군': [],
+      '함평군': [],
+      '영광군': [],
+      '영암군': [],
+      '강진군': [],
+    },
+    '경상북도': {
+      '포항시': [],
+      '경주시': [],
+      '김천시': [],
+      '안동시': [],
+      '구미시': [],
+      '영천시': [],
+      '상주시': [],
+      '문경시': [],
+      '경산시': [],
+    },
+    '경상남도': {
+      '창원시': [],
+      '진주시': [],
+      '통영시': [],
+      '사천시': [],
+      '김해시': [],
+      '밀양시': [],
+      '거제시': [],
+      '양산시': [],
+      '의령군': [],
+    },
+    '제주특별자치도': {
+      '제주시': [],
+      '서귀포시': [],
+    },
+  };
+
+  // parse location string '시도 시군구 읍면동'
+  const parseLocation = (loc?: string) => {
+    if (!loc) return { province: "", city: "", district: "" };
+    const parts = loc.split(" ").filter((p) => p.length > 0);
+    return {
+      province: parts[0] || "",
+      city: parts[1] || "",
+      district: parts[2] || "",
+    };
+  };
+
+  const [province, setProvince] = React.useState<string>(parseLocation(location).province);
+  const [city, setCity] = React.useState<string>(parseLocation(location).city);
+  const [district, setDistrict] = React.useState<string>(parseLocation(location).district);
+
+  // sync when prop location changes
+  React.useEffect(() => {
+    const p = parseLocation(location);
+    setProvince(p.province);
+    setCity(p.city);
+    setDistrict(p.district);
+  }, [location]);
+
+  // update combined location when any part changes
+  React.useEffect(() => {
+    if (!province) return onChangeLocation("");
+    const parts = [province];
+    if (city) parts.push(city);
+    if (district) parts.push(district);
+    onChangeLocation(parts.join(" "));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [province, city, district]);
+
   return (
     <div className="grid gap-5 text-sm text-[#3b4350] sm:grid-cols-2">
       <FieldRow label="생년월일">
@@ -82,14 +332,72 @@ export default function BasicInfoSection({
       </FieldRow>
 
       <FieldRow label="거주 지역">
-        <TextInput
-          readOnly={readOnly}
-          inputProps={{
-            value: location,
-            onChange: (e) => onChangeLocation(e.target.value),
-            placeholder: "거주 지역을 입력하세요",
-          }}
-        />
+        {!readOnly ? (
+          <div className="grid grid-cols-2 gap-3">
+            <SelectInput
+              selectProps={{
+                value: province,
+                onChange: (e) => {
+                  setProvince(e.target.value);
+                  setCity("");
+                  setDistrict("");
+                },
+              }}
+            >
+              <option value="">시/도</option>
+              {Object.keys(REGION_TREE).map((p) => (
+                <option key={p} value={p}>
+                  {p}
+                </option>
+              ))}
+            </SelectInput>
+
+            <SelectInput
+              selectProps={{
+                value: city,
+                onChange: (e) => {
+                  setCity(e.target.value);
+                  setDistrict("");
+                },
+                disabled: !province,
+              }}
+            >
+              <option value="">시/군/구</option>
+              {Object.keys(REGION_TREE[province] || {}).map((c) => (
+                <option key={c} value={c}>
+                  {c}
+                </option>
+              ))}
+            </SelectInput>
+
+            {(
+              REGION_TREE[province]?.[city]?.length ?? 0
+            ) > 0 && (
+              <SelectInput
+                selectProps={{
+                  value: district,
+                  onChange: (e) => setDistrict(e.target.value),
+                }}
+              >
+                <option value="">구</option>
+                {REGION_TREE[province][city].map((d) => (
+                  <option key={d} value={d}>
+                    {d}
+                  </option>
+                ))}
+              </SelectInput>
+            )}
+          </div>
+        ) : (
+          <TextInput
+            readOnly
+            inputProps={{
+              value: location,
+              onChange: (e) => onChangeLocation(e.target.value),
+              placeholder: "거주 지역을 입력하세요",
+            }}
+          />
+        )}
       </FieldRow>
 
       <FieldRow label="닉네임">
