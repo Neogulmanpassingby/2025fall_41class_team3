@@ -8,9 +8,6 @@ import SignupStepper from "@/components/auth/SignupStepper";
 import TogglePill from "@/components/common/TogglePill";
 import { setAuthCookies } from "@/lib/auth/tokenClient";
 
-// -------------------------------------------------------
-// STEP 안내
-// -------------------------------------------------------
 const STEPS = [
   { id: 1, label: "이메일/비밀번호" },
   { id: 2, label: "기본 정보 입력" },
@@ -25,15 +22,11 @@ const STEP_DESCRIPTIONS: Record<number, string> = {
   4: "회원가입 단계가 모두 완료되었습니다.",
 };
 
-// -------------------------------------------------------
-// Flutter 기준 옵션셋 완전 통합
-// -------------------------------------------------------
 const YEARS = Array.from({ length: 60 }, (_, i) => `${1965 + i}`);
 const MONTHS = Array.from({ length: 12 }, (_, i) => `${i + 1}`);
 const DAYS = Array.from({ length: 31 }, (_, i) => `${i + 1}`);
 
 
-// Flutter 기준 옵션셋
 const EMPLOYMENT_OPTIONS = [
   "재직자",
   "자영업자",
@@ -99,6 +92,7 @@ const INTEREST_OPTIONS = [
   "주거지원",
 ];
 
+//하드코딩
 const REGION_TREE: Record<string, Record<string, string[]>> = {
   '서울특별시': {
     '종로구': [],
@@ -473,7 +467,12 @@ export default function SignupPage() {
     try {
       const res = await fetch(`/api/auth/check-email?email=${encodeURIComponent(form.email)}`);
       if (!res.ok) throw new Error();
-      setEmailStatus("success");
+      const json = await res.json();
+      if (json?.data?.exists) {
+        setEmailStatus("error");
+      } else {
+        setEmailStatus("success");
+      }
     } catch {
       setEmailStatus("error");
     }
@@ -484,8 +483,16 @@ export default function SignupPage() {
     setNicknameStatus("checking");
     try {
       const res = await fetch(`/api/auth/check-nickname?nickname=${encodeURIComponent(form.nickname)}`);
-      if (!res.ok) throw new Error();
-      setNicknameStatus("success");
+      if (!res.ok) {
+        // server may return 400 for blacklist or other validation
+        throw new Error();
+      }
+      const json = await res.json();
+      if (json?.data?.exists) {
+        setNicknameStatus("error");
+      } else {
+        setNicknameStatus("success");
+      }
     } catch {
       setNicknameStatus("error");
     }

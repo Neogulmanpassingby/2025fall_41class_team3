@@ -195,7 +195,12 @@ export default function SignupPage() {
       if (!res.ok) {
         throw new Error("이메일 중복");
       }
-      setEmailStatus("success");
+      const json = await res.json();
+      if (json?.data?.exists) {
+        setEmailStatus("error");
+      } else {
+        setEmailStatus("success");
+      }
     } catch (err) {
       console.error(err);
       setEmailStatus("error");
@@ -212,7 +217,12 @@ export default function SignupPage() {
       if (!res.ok) {
         throw new Error("닉네임 중복");
       }
-      setNicknameStatus("success");
+      const json = await res.json();
+      if (json?.data?.exists) {
+        setNicknameStatus("error");
+      } else {
+        setNicknameStatus("success");
+      }
     } catch (err) {
       console.error(err);
       setNicknameStatus("error");

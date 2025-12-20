@@ -44,7 +44,8 @@ async function initDB() {
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         refreshToken TEXT,
         likedPolicies TEXT,
-        recommendCount INT DEFAULT 5
+        recommendCount INT DEFAULT 5,
+        UNIQUE KEY uk_user_nickname (nickname)
       )
     `);
     console.log("✔ users 테이블 생성 완료");

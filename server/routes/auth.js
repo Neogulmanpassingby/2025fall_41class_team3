@@ -26,9 +26,17 @@ router.post('/signup', async (req, res) => {
   }
 
   try {
-    const [existing] = await db.query('SELECT email FROM users WHERE email = ?', [email]);
+    const normEmail = email.trim().toLowerCase();
+    const normNickname = nickname.trim();
+
+    const [existing] = await db.query('SELECT email FROM users WHERE email = ?', [normEmail]);
     if (existing.length > 0) {
       return res.status(409).json({ message: '이메일 중복' });
+    }
+
+    const [existingNick] = await db.query('SELECT nickname FROM users WHERE nickname = ?', [normNickname]);
+    if (existingNick.length > 0) {
+      return res.status(409).json({ message: '닉네임 중복' });
     }
 
     const hashedPassword = await bcrypt.hash(password, 10);
@@ -41,8 +49,8 @@ await db.query(`
   (email, nickname, password, birthDate, location, income, maritalStatus, education, major, employmentStatus, specialGroup, interests)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `, [
-  email,
-  nickname,
+  normEmail,
+  normNickname,
   hashedPassword,
   birthDate,
   location,
@@ -55,10 +63,10 @@ await db.query(`
   JSON.stringify(normalizeArray(interests)),
 ]);
 
-    const accessToken = jwt.sign({ userId: email }, JWT_SECRET, { expiresIn: '1h' });
+    const accessToken = jwt.sign({ userId: normEmail }, JWT_SECRET, { expiresIn: '1h' });
     const refreshToken = generateRefreshToken();
 
-    await db.query('UPDATE users SET refreshToken = ? WHERE email = ?', [refreshToken, email]);
+    await db.query('UPDATE users SET refreshToken = ? WHERE email = ?', [refreshToken, normEmail]);
 
     res.status(201).json({
       status: 'success',
