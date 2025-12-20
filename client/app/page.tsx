@@ -131,11 +131,33 @@ export default function HomePage() {
       }
       const data = (await res.json()) as Partial<PolicyDetail>;
       const detail: PolicyDetail = {
-        ...policy,
-        ...data,
         id: policy.id,
-        title: data.title || policy.title,
-        summary: data.summary || data.description || policy.summary,
+        plcyNm: data.plcyNm || policy.title,
+        lclsfNm: data.lclsfNm || "",
+        mclsfNm: data.mclsfNm || "",
+        plcyKywdNm: (data.plcyKywdNm as string[]) || [],
+        plcyExplnCn: data.plcyExplnCn || policy.summary,
+        plcySprtCn: data.plcySprtCn || undefined,
+        plcyAplyMthdCn: data.plcyAplyMthdCn || undefined,
+        aplyYmd: data.aplyYmd || undefined,
+        bizPrdBgngYmd: data.bizPrdBgngYmd || undefined,
+        bizPrdEndYmd: data.bizPrdEndYmd || undefined,
+        aplyUrlAddr: data.aplyUrlAddr || undefined,
+        srngMthdCn: data.srngMthdCn || undefined,
+        sbmsnDcmntCn: data.sbmsnDcmntCn || undefined,
+        sprtTrgtAgeLmtYn: data.sprtTrgtAgeLmtYn,
+        sprtTrgtMinAge: data.sprtTrgtMinAge,
+        sprtTrgtMaxAge: data.sprtTrgtMaxAge,
+        zipCd: data.zipCd,
+        earnEtcCn: data.earnEtcCn,
+        schoolCd: data.schoolCd,
+        jobCd: data.jobCd,
+        plcyMajorCd: data.plcyMajorCd,
+        addAplyQlfcCndCn: data.addAplyQlfcCndCn,
+        ptcpPrpTrgtCn: data.ptcpPrpTrgtCn,
+        etcMttrCn: data.etcMttrCn,
+        refUrlAddr1: data.refUrlAddr1,
+        refUrlAddr2: data.refUrlAddr2,
       };
       setSelectedPolicy(detail);
       setStatusMessage(null);
