@@ -192,6 +192,10 @@ export default function SignupPage() {
     setEmailStatus("checking");
     try {
       const res = await fetch(`/api/auth/check-email?email=${encodeURIComponent(form.email)}`);
+      if (res.status === 409) {
+        setEmailStatus("error");
+        return;
+      }
       if (!res.ok) {
         throw new Error("이메일 중복");
       }
@@ -205,7 +209,7 @@ export default function SignupPage() {
       console.error(err);
       setEmailStatus("error");
     }
-  };
+  }; 
 
   const handleCheckNickname = async () => {
     if (!form.nickname) return;
@@ -214,6 +218,10 @@ export default function SignupPage() {
       const res = await fetch(
         `/api/auth/check-nickname?nickname=${encodeURIComponent(form.nickname)}`,
       );
+      if (res.status === 409) {
+        setNicknameStatus("error");
+        return;
+      }
       if (!res.ok) {
         throw new Error("닉네임 중복");
       }

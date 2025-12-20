@@ -158,14 +158,16 @@ router.get('/check-email', async (req, res) => {
   try {
     const [rows] = await db.query('SELECT email FROM users WHERE email = ?', [email]);
     const exists = rows.length > 0;
-    res.json({ data: { exists } });
+    if (exists) {
+      return res.status(409).json({ message: '이메일 중복', data: { exists: true } });
+    }
+    res.json({ data: { exists: false } });
   } catch (err) {
     console.error('이메일 중복 확인 실패:', err);
     res.status(500).json({ message: '서버 오류' });
   }
 });
 
-// 닉네임 중복 체크 API
 router.get('/check-nickname', async (req, res) => {
   const { nickname } = req.query;
 
@@ -190,7 +192,10 @@ router.get('/check-nickname', async (req, res) => {
   try {
     const [rows] = await db.query('SELECT 1 FROM users WHERE nickname = ? LIMIT 1', [nickname]);
     const exists = rows.length > 0;
-    res.json({ data: { exists } });
+    if (exists) {
+      return res.status(409).json({ message: '닉네임 중복', data: { exists: true } });
+    }
+    res.json({ data: { exists: false } });
   } catch (err) {
     console.error('닉네임 중복 확인 실패:', err);
     res.status(500).json({ message: '서버 오류' });

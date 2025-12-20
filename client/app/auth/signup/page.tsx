@@ -466,6 +466,10 @@ export default function SignupPage() {
     setEmailStatus("checking");
     try {
       const res = await fetch(`/api/auth/check-email?email=${encodeURIComponent(form.email)}`);
+      if (res.status === 409) {
+        setEmailStatus("error");
+        return;
+      }
       if (!res.ok) throw new Error();
       const json = await res.json();
       if (json?.data?.exists) {
@@ -476,7 +480,7 @@ export default function SignupPage() {
     } catch {
       setEmailStatus("error");
     }
-  };
+  }; 
 
   const handleCheckNickname = async () => {
     if (!form.nickname) return;
