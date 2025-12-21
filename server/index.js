@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const swaggerUi = require('swagger-ui-express');
+const swaggerSpec = require('./config/swagger');
 
 const authRouter = require('./routes/auth');
 const policyRouter = require('./routes/policies');
@@ -33,11 +35,26 @@ app.use((req, res, next) => {
   next();
 });
 
+// Swagger 문서 제공
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
+  swaggerOptions: {
+    url: '/swagger.json'
+  }
+}));
+
+// Swagger JSON 제공
+app.get('/swagger.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.send(swaggerSpec);
+});
+
 app.use('/api/auth', authRouter);
 app.use('/api/policies', policyRouter);
 app.use('/api/mypage', mypageRouter);
 
 app.listen(PORT, '0.0.0.0', () => {
   console.log(`Server on 0.0.0.0:${PORT}`);
+  console.log(`Swagger 문서: http://localhost:${PORT}/api-docs`);
 });
+
 
