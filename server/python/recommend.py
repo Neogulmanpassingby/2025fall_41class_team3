@@ -1,23 +1,29 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
+
 """
-리팩토링 포인트
-- 이름 대신 **ID 기반 선택**으로 위치 바이어스 제거
-- LLM 입출력 최소화: 요약 JSON만 전달, 응답은 [id,id,...] 순수 배열
-- 안정성: 엄격한 검증(Pydantic), 타임아웃/재시도, 로깅, 예외 처리
-- 구조화: Config/DB/Filtering/LLM/Presentation 모듈화
-- 재현성: user_id+날짜 기반 시드로 셔플 고정(동일 입력 → 동일 결과)
-- LangChain 호환: langchain_openai 우선, 실패 시 구버전 import fallback
+개선 요약 (완성본)
+- 지역 매칭 강화: "경기도 수원시" vs "경기"/"경기도"/"11" 같은 케이스 대응
+- 관심키워드: 하드필터 제거 -> 점수화(랭킹 신호로만 사용)
+- 재현성 시드: Python hash 랜덤성 제거 -> sha256 기반 정수 시드
+- 배지/설명: 근거 약한 "조건 부합" 문구 제거(오해 방지)
+- LLM 호출: invoke 통일 + ID 유효성/중복 제거 강화
+- ✅ 핵심: user_preference를 '의도(intent)'로 해석해서 우선 반영
+  - preference에서 intent 추출(취업/주거/창업/금융/세금/교육)
+  - 정책을 rule-based로 policy_type 분류
+  - 후보 구성에서 intent 타입 최소 확보 (top_n_view의 60%, 최소 3개)
+  - pre_score에서 intent 불일치 항목의 키워드 보너스 강하게 축소
+  - LLM 선택 프롬프트에도 intent 제약(가능하면 최소 3개)
 """
 
 import os
 import sys
 import json
-import difflib
 import re
 import time
 import math
 import logging
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional, Tuple
@@ -27,11 +33,10 @@ from dotenv import load_dotenv
 
 # --- LangChain / Pydantic ---
 try:
-    # 신형 경로 (langchain>=0.2)
     from langchain_openai import ChatOpenAI
 except Exception:
-    # 구형 호환
     from langchain.chat_models import ChatOpenAI
+
 from langchain_core.messages import SystemMessage, HumanMessage
 from pydantic import BaseModel, ValidationError, Field
 
@@ -54,18 +59,21 @@ logger = logging.getLogger("policy-reco")
 class AppConfig:
     openai_api_key: str = os.environ.get("OPENAI_API_KEY", "")
     llm_model: str = os.environ.get("LLM_MODEL", "gpt-4o")
+
     db_host: str = os.environ.get("DB_HOST", "")
     db_user: str = os.environ.get("DB_USER", "")
     db_password: str = os.environ.get("DB_PASSWORD", "")
     db_name: str = os.environ.get("DB_NAME", "")
     db_charset: str = "utf8mb4"
-    top_n_view: int = int(os.environ.get("TOP_N_VIEW", "30"))  # LLM에 보여줄 후보 개수
-    select_k: int = int(os.environ.get("SELECT_K", "5"))       # 최종 선택 개수
+
+    top_n_view: int = int(os.environ.get("TOP_N_VIEW", "40"))
+    select_k: int = int(os.environ.get("SELECT_K", "5"))
+
     llm_timeout_s: int = int(os.environ.get("LLM_TIMEOUT_S", "30"))
     llm_retries: int = int(os.environ.get("LLM_RETRIES", "2"))
+
     reason_chunk_size: int = int(os.environ.get("REASON_CHUNK_SIZE", "20"))
     reason_max_tokens: int = int(os.environ.get("REASON_MAX_TOKENS", "800"))
-    name_fallback_cutoff: float = float(os.environ.get("NAME_FALLBACK_CUTOFF", "0.85"))
 
 CFG = AppConfig()
 
@@ -103,19 +111,156 @@ def split_field(val: Any) -> List[str]:
         return []
     return [v.strip() for v in s.split(",") if v.strip()]
 
+# --------------------------
+# 지역 정규화/매칭
+# --------------------------
+KOR_SIDO_CODE = {
+    "11": "서울", "26": "부산", "27": "대구", "28": "인천", "29": "광주", "30": "대전", "31": "울산",
+    "36": "세종",
+    "41": "경기", "42": "강원", "43": "충북", "44": "충남",
+    "45": "전북", "46": "전남",
+    "47": "경북", "48": "경남",
+    "50": "제주",
+}
+
+def normalize_user_region_list(region_list: List[str]) -> List[str]:
+    tokens: List[str] = []
+    for r in region_list or []:
+        rr = (r or "").strip()
+        if not rr:
+            continue
+        parts = [p.strip() for p in rr.split() if p.strip()]
+        tokens.append(rr)
+        tokens.extend(parts)
+
+        for p in parts:
+            if p.endswith("도") and len(p) >= 2:
+                tokens.append(p[:-1])
+            if p.endswith("특별시") or p.endswith("광역시") or p.endswith("자치시") or p.endswith("자치도"):
+                tokens.append(
+                    p.replace("특별시", "").replace("광역시", "").replace("자치시", "").replace("자치도", "")
+                )
+
+    seen = set()
+    out: List[str] = []
+    for t in tokens:
+        if t not in seen:
+            out.append(t)
+            seen.add(t)
+    return out
+
+def normalize_policy_region_list(policy_list: List[str]) -> List[str]:
+    out: List[str] = []
+    for x in policy_list or []:
+        s = (x or "").strip()
+        if not s:
+            continue
+        if s.isdigit() and s in KOR_SIDO_CODE:
+            out.append(KOR_SIDO_CODE[s])
+        out.append(s)
+        if s.endswith("도") and len(s) >= 2:
+            out.append(s[:-1])
+
+    seen = set()
+    uniq: List[str] = []
+    for t in out:
+        if t not in seen:
+            uniq.append(t)
+            seen.add(t)
+    return uniq
+
+def region_match(policy_regions: List[str], user_regions: List[str]) -> bool:
+    if not policy_regions:
+        return True
+    if not user_regions:
+        return True
+
+    pr = normalize_policy_region_list(policy_regions)
+    ur = normalize_user_region_list(user_regions)
+
+    for p in pr:
+        for u in ur:
+            if p and u and (p in u or u in p):
+                return True
+    return False
+
+def region_match_strength(policy_regions: List[str], user_regions: List[str]) -> str:
+    if not policy_regions:
+        return "nationwide"
+    if not user_regions:
+        return "unknown"
+
+    pr = normalize_policy_region_list(policy_regions)
+    ur = normalize_user_region_list(user_regions)
+
+    if set(pr) & set(ur):
+        return "exact"
+
+    for p in pr:
+        for u in ur:
+            if p and u and (p in u or u in p):
+                return "partial"
+
+    return "mismatch"
+
+# --------------------------
+# Intent / Policy type (룰 기반)
+# --------------------------
+INTENT_LABELS = ["employment", "housing", "startup", "finance", "tax", "education", "other"]
+
+def detect_intent(preference: str) -> Optional[str]:
+    t = (preference or "").lower()
+
+    if any(k in t for k in ["취업", "일자리", "채용", "구직", "면접", "인턴", "고용", "재직", "취업지원"]):
+        return "employment"
+    if any(k in t for k in ["주거", "월세", "전세", "임대", "주택", "보증금", "청년주택"]):
+        return "housing"
+    if any(k in t for k in ["창업", "스타트업", "사업화", "창업지원", "보육", "액셀러"]):
+        return "startup"
+    if any(k in t for k in ["대출", "보증", "융자", "금리", "이자", "자금", "한도", "상환"]):
+        return "finance"
+    if any(k in t for k in ["세금", "세액", "공제", "감면", "연말정산", "과세"]):
+        return "tax"
+    if any(k in t for k in ["교육", "훈련", "과정", "강의", "캠프", "프로그램", "멘토링"]):
+        return "education"
+    return None
+
+def classify_policy_type(p: Dict[str, Any]) -> str:
+    text = f"{p.get('plcyNm','')} {p.get('plcySprtCn','')} {p.get('plcyExplnCn','')}".lower()
+
+    if any(k in text for k in ["취업", "일자리", "채용", "구직", "면접", "인턴", "직업", "고용", "재직", "취업지원"]):
+        return "employment"
+    if any(k in text for k in ["주거", "월세", "전세", "임대", "주택", "기숙사", "보증금", "청년주택"]):
+        return "housing"
+    if any(k in text for k in ["창업", "스타트업", "사업화", "보육", "액셀러", "입주", "창업공간"]):
+        return "startup"
+    if any(k in text for k in ["대출", "보증", "융자", "금리", "이자", "자금", "한도", "상환"]):
+        return "finance"
+    if any(k in text for k in ["세금", "세액", "공제", "감면", "소득공제", "연말정산"]):
+        return "tax"
+    if any(k in text for k in ["교육", "훈련", "과정", "강의", "캠프", "프로그램", "멘토링", "컨설팅"]):
+        return "education"
+
+    return "other"
+
+# --------------------------
+# 정책/유저 로드
+# --------------------------
 def preprocess_policy_row(policy: Dict[str, Any]) -> Dict[str, Any]:
-    # 리스트형으로 normalize
     for key in ["zipCd", "mrgSttsCd", "schoolCd", "jobCd", "plcyMajorCd", "sbizCd", "plcyKywdNm"]:
         policy[key] = split_field(policy.get(key))
-    # 정수 normalize
+
     for k in ["sprtTrgtMinAge", "sprtTrgtMaxAge", "earnMinAmt", "earnMaxAmt", "id"]:
         policy[k] = _to_int(policy.get(k), 0)
-    # 텍스트 기본값
+
     for k in ["plcyNm", "lclsfNm", "mclsfNm", "plcyPvsnMthdCd", "plcyExplnCn", "plcySprtCn"]:
         policy[k] = (policy.get(k) or "").strip()
-    # 기타 flag
+
     policy["sprtTrgtAgeLmtYn"] = (policy.get("sprtTrgtAgeLmtYn") or "N").strip()
     policy["earnCndSeCd"] = (policy.get("earnCndSeCd") or "무관").strip()
+
+    # ✅ policy_type 추가
+    policy["policy_type"] = classify_policy_type(policy)
     return policy
 
 def load_policies_from_db(cfg: AppConfig) -> List[Dict[str, Any]]:
@@ -132,27 +277,32 @@ def load_user_from_db(cfg: AppConfig, user_id: str) -> Dict[str, Any]:
     with db.connect() as conn, conn.cursor() as cur:
         cur.execute("SELECT * FROM users WHERE email=%s", (user_id,))
         user = cur.fetchone()
+
     if not user:
         raise ValueError(f"사용자 {user_id}를 찾을 수 없습니다.")
 
-    # 표준화
-    profile: Dict[str, Any] = {}
-    profile["region"] = [user["location"].strip()] if user.get("location") else []
-    profile["marriage"] = [user["maritalStatus"].strip()] if user.get("maritalStatus") else []
-    profile["education"] = [user["education"].strip()] if user.get("education") else []
-    profile["job"] = [user["job"].strip()] if user.get("job") else []
-    profile["major"] = [user["major"].strip()] if user.get("major") else []
+    location = (user.get("location") or "").strip()
+    marital = (user.get("maritalStatus") or "").strip()
+    education = (user.get("education") or "").strip()
+    major = (user.get("major") or "").strip()
+    job = (user.get("job") or user.get("employmentstatus") or "").strip()
 
-    # 관심/특화 JSON
+    profile: Dict[str, Any] = {}
+    profile["region"] = [location] if location else []
+    profile["marriage"] = [marital] if marital else []
+    profile["education"] = [education] if education else []
+    profile["job"] = [job] if job else []
+    profile["major"] = [major] if major else []
+
     def _loads_safe(s, default):
         try:
             return json.loads(s) if s else default
         except Exception:
             return default
+
     profile["interest_keywords"] = _loads_safe(user.get("interests"), [])
     profile["special"] = _loads_safe(user.get("specialGroup"), [])
 
-    # 나이
     age = 0
     if user.get("birthDate"):
         try:
@@ -163,18 +313,14 @@ def load_user_from_db(cfg: AppConfig, user_id: str) -> Dict[str, Any]:
             age = 0
     profile["age"] = age
 
-    # 소득
     profile["income"] = _to_int(user.get("income"), 0)
-
-    # 원시 필드도 필요하면 붙여두자
     profile["_raw"] = user
     return profile
 
 # --------------------------
-# 필터링
+# 필터링 (하드필터는 “불가능한 것”만)
 # --------------------------
 def _multi_field_match(policy_list: List[str], user_list: List[str]) -> bool:
-    # 정책이 비어있거나 '무관' 류면 통과
     if not policy_list:
         return True
     if any(p in ("제한없음", "무관", "", None) for p in policy_list):
@@ -187,45 +333,39 @@ def _multi_field_match(policy_list: List[str], user_list: List[str]) -> bool:
 def filter_policies(policies: List[Dict[str, Any]], user: Dict[str, Any]) -> List[Dict[str, Any]]:
     result = []
     for p in policies:
-        # 연령
         age_limit = p.get("sprtTrgtAgeLmtYn", "N")
         if age_limit != "N":
             min_age = _to_int(p.get("sprtTrgtMinAge"), 0)
             max_age = _to_int(p.get("sprtTrgtMaxAge"), 200)
             ua = _to_int(user.get("age"), 0)
-            if not (min_age == 0 and max_age == 0) and not (min_age <= ua <= max_age):
+            if not (min_age == 0 and max_age == 0) and ua and not (min_age <= ua <= max_age):
                 continue
 
-        # 지역/결혼/학력/직업/전공/특화
-        if not _multi_field_match(p.get("zipCd", []), user.get("region", [])):    continue
+        if not region_match(p.get("zipCd", []), user.get("region", [])):
+            continue
+
         if not _multi_field_match(p.get("mrgSttsCd", []), user.get("marriage", [])): continue
         if not _multi_field_match(p.get("schoolCd", []), user.get("education", [])): continue
         if not _multi_field_match(p.get("jobCd", []), user.get("job", [])):          continue
         if not _multi_field_match(p.get("plcyMajorCd", []), user.get("major", [])):  continue
         if not _multi_field_match(p.get("sbizCd", []), user.get("special", [])):     continue
 
-        # 소득
-        income_type = p.get("earnCndSeCd", "무관")
+        income_type = (p.get("earnCndSeCd") or "무관").strip()
         if income_type not in ("무관", "제한없음", ""):
             min_income = _to_int(p.get("earnMinAmt"), 0)
             max_income = _to_int(p.get("earnMaxAmt"), int(1e9))
             ui = _to_int(user.get("income"), 0)
-            if not (min_income <= ui <= max_income):
+            if ui and not (min_income <= ui <= max_income):
                 continue
 
-        # 관심 키워드가 있으면 교집합 필요
-        if user.get("interest_keywords"):
-            uks = set(user.get("interest_keywords", []))
-            pks = set(p.get("plcyKywdNm", []))
-            if not (uks & pks):
-                continue
-
+        # ✅ 관심키워드 하드필터 제거
         result.append(p)
+
     logger.info("filtered policies: %d -> %d", len(policies), len(result))
     return result
 
 # --------------------------
-# 요약/스코어/셔플(바이어스 완화)
+# 요약/스코어
 # --------------------------
 def _intersect(a: List[str], b: List[str]) -> List[str]:
     if not a or not b:
@@ -234,15 +374,20 @@ def _intersect(a: List[str], b: List[str]) -> List[str]:
     return [x for x in a if x in sb]
 
 def summarize_for_llm(p: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]:
+    r_strength = region_match_strength(p.get("zipCd", []), user.get("region", []))
+    kw = _intersect(p.get("plcyKywdNm", []), user.get("interest_keywords", []))
+
     return {
         "id": int(p.get("id") or -1),
+        "policy_type": p.get("policy_type", "other"),
         "name": (p.get("plcyNm") or "")[:120],
         "category": [p.get("lclsfNm") or "", p.get("mclsfNm") or ""],
         "method": p.get("plcyPvsnMthdCd") or "",
         "support": (p.get("plcySprtCn") or "")[:240],
         "desc": (p.get("plcyExplnCn") or "")[:240],
         "matches": {
-            "region": _intersect(p.get("zipCd", []), user.get("region", []))[:1],
+            "region_strength": r_strength,
+            "region_hint": (normalize_policy_region_list(p.get("zipCd", []))[:2] if p.get("zipCd") else []),
             "age": {
                 "limit": p.get("sprtTrgtAgeLmtYn", "N"),
                 "min": _to_int(p.get("sprtTrgtMinAge"), 0),
@@ -250,46 +395,120 @@ def summarize_for_llm(p: Dict[str, Any], user: Dict[str, Any]) -> Dict[str, Any]
                 "user": _to_int(user.get("age"), 0),
             },
             "income": {
-                "type": p.get("earnCndSeCd") or "",
+                "type": (p.get("earnCndSeCd") or ""),
                 "min": _to_int(p.get("earnMinAmt"), 0),
                 "max": _to_int(p.get("earnMaxAmt"), 0),
                 "user": _to_int(user.get("income"), 0),
             },
-            "keywords": _intersect(p.get("plcyKywdNm", []), user.get("interest_keywords", []))[:3],
+            "keywords": kw[:5],
+            "keyword_overlap": len(kw),
         },
     }
 
 def _tokenize_korean(s: str) -> List[str]:
-    # 간단 토크나이저(공백/구두점 기준). 형태소 분석기 없이도 의미 있는 프리스코어 목적.
-    return [t for t in re.split(r"[^\w가-힣]+", s.lower()) if t]
+    return [t for t in re.split(r"[^\w가-힣]+", (s or "").lower()) if t]
 
-def pre_score(summary: Dict[str, Any], pref_tokens: List[str]) -> int:
-    text = f"{summary.get('name','')} {' '.join(summary.get('matches',{}).get('keywords',[]))} {summary.get('support','')} {summary.get('desc','')}"
+def pre_score(summary: Dict[str, Any], pref_tokens: List[str], intent: Optional[str]) -> float:
+    m = summary.get("matches", {})
+    region_strength = m.get("region_strength", "unknown")
+    kw_overlap = int(m.get("keyword_overlap", 0))
+
+    text = f"{summary.get('name','')} {' '.join(m.get('keywords',[]))} {summary.get('support','')} {summary.get('desc','')}"
     tl = text.lower()
-    sc = sum(1 for t in pref_tokens if t and t in tl)
-    sc += len(summary.get("matches", {}).get("keywords", []))  # 관심 키워드 일치 가산
-    return sc
 
-def deterministic_shuffle(items: List[Dict[str, Any]], seed: int) -> None:
-    # 파이썬 내장 random 없이, 재현 가능 셔플(피셔-예이츠) + 간단 LCG
+    pref_hit = sum(1 for t in pref_tokens if t and t in tl)
+
+    region_bonus = {
+        "exact": 6.0,
+        "partial": 4.0,
+        "nationwide": 0.0,
+        "unknown": 0.5,
+        "mismatch": -10.0,
+    }.get(region_strength, 0.0)
+
+    kw_bonus = min(kw_overlap, 5) * 2.2
+
+    length_penalty = 0.0
+    if len(summary.get("support", "")) < 20 and len(summary.get("desc", "")) < 30:
+        length_penalty = -1.5
+
+    policy_type = summary.get("policy_type", "other")
+    intent_bonus = 0.0
+
+    if intent:
+        # preference가 명확한 '요청'일 때: long-term profile(interest)보다 우선
+        if policy_type == intent:
+            intent_bonus = 10.0
+            pref_weight = 2.8
+            kw_scale = 1.0
+        else:
+            # intent 불일치면 강하게 누르기(대출이 취업을 이기는 문제 방지)
+            intent_bonus = -4.0
+            pref_weight = 2.8
+            kw_scale = 0.25
+        kw_bonus *= kw_scale
+    else:
+        pref_weight = 1.5
+
+    return (pref_hit * pref_weight) + region_bonus + kw_bonus + length_penalty + intent_bonus
+
+# --------------------------
+# 재현성 셔플/샘플링
+# --------------------------
+def stable_seed_int(*parts: str) -> int:
+    s = "|".join(parts)
+    h = hashlib.sha256(s.encode("utf-8")).hexdigest()
+    return int(h[:8], 16)
+
+def deterministic_shuffle(items: List[Any], seed: int) -> None:
     n = len(items)
     a, c, m = 1103515245, 12345, 2**31
     x = seed % m
+
     def rand():
         nonlocal x
         x = (a * x + c) % m
         return x
+
     for i in range(n - 1, 0, -1):
         j = rand() % (i + 1)
         items[i], items[j] = items[j], items[i]
 
-def build_candidate_view(policies: List[Dict[str, Any]], user: Dict[str, Any],
-                         user_preference: str, top_n_view: int, stable_seed: int) -> List[Dict[str, Any]]:
+def build_candidate_view(
+    policies: List[Dict[str, Any]],
+    user: Dict[str, Any],
+    user_preference: str,
+    top_n_view: int,
+    seed: int
+) -> List[Dict[str, Any]]:
     summaries = [summarize_for_llm(p, user) for p in policies]
     pref_tokens = _tokenize_korean(user_preference)
-    summaries.sort(key=lambda s: pre_score(s, pref_tokens), reverse=True)
-    view = summaries[:top_n_view]
-    deterministic_shuffle(view, stable_seed)  # 동점/근접 점수 항목들 섞기(위치 바이어스 감소)
+    intent = detect_intent(user_preference)
+
+    scored = [(pre_score(s, pref_tokens, intent), s) for s in summaries]
+    scored.sort(key=lambda x: x[0], reverse=True)
+
+    if intent:
+        same = [s for _, s in scored if s.get("policy_type") == intent]
+        other = [s for _, s in scored if s.get("policy_type") != intent]
+
+        min_intent = max(3, int(top_n_view * 0.6))
+        picked = same[:min_intent]
+
+        remain = top_n_view - len(picked)
+        deterministic_shuffle(other, seed ^ 0xA5A5A5A5)
+        picked += other[:max(0, remain)]
+        view = picked
+    else:
+        keep_main = int(math.ceil(top_n_view * 0.7))
+        main = [s for _, s in scored[:keep_main]]
+
+        rest_pool = [s for _, s in scored[keep_main:keep_main + 120]]
+        deterministic_shuffle(rest_pool, seed ^ 0xA5A5A5A5)
+        extra = rest_pool[: max(0, top_n_view - keep_main)]
+        view = main + extra
+
+    deterministic_shuffle(view, seed)
     return view
 
 # --------------------------
@@ -300,7 +519,6 @@ class ReasonItemModel(BaseModel):
     reason: str = Field(min_length=6, max_length=200)
 
 def new_llm(cfg: AppConfig, temperature: float, max_tokens: int) -> ChatOpenAI:
-    # 일부 드라이버는 timeout 인자를 지원
     try:
         return ChatOpenAI(
             model=cfg.llm_model,
@@ -310,7 +528,6 @@ def new_llm(cfg: AppConfig, temperature: float, max_tokens: int) -> ChatOpenAI:
             timeout=cfg.llm_timeout_s,
         )
     except TypeError:
-        # timeout 미지원 드라이버 호환
         return ChatOpenAI(
             model=cfg.llm_model,
             temperature=temperature,
@@ -318,18 +535,29 @@ def new_llm(cfg: AppConfig, temperature: float, max_tokens: int) -> ChatOpenAI:
             openai_api_key=cfg.openai_api_key,
         )
 
-def select_policy_ids_with_llm(cfg: AppConfig, candidates: List[Dict[str, Any]],
-                               user_profile: Dict[str, Any], user_preference: str,
-                               k: int) -> List[int]:
-    """
-    candidates: summarize_for_llm 결과의 서브셋(길이 제한됨)
-    LLM 출력: [1,23,5,9,14] 같은 **순수 JSON 배열**만 허용
-    """
+def select_policy_ids_with_llm(
+    cfg: AppConfig,
+    candidates: List[Dict[str, Any]],
+    user_profile: Dict[str, Any],
+    user_preference: str,
+    k: int
+) -> List[int]:
+    intent = detect_intent(user_preference)
+
     sys_prompt = (
-        "역할: 한국 청년정책 추천 에디터. 사실만 사용.\n"
-        "반드시 **순수 JSON 배열**만 반환하라. 예: [1, 23, 5, 9, 14]\n"
-        "설명/문장/키/객체 금지. **정수 ID만** {k}개. 목록에 없는 ID 금지."
-    ).format(k=k)
+        "역할: 한국 청년정책 추천 편집자.\n"
+        "데이터에 있는 정보만 사용.\n"
+        "우선순위:\n"
+        "1) region_strength가 exact/partial인 것 우선\n"
+        "2) keyword_overlap 높은 것 우선\n"
+        "3) 사용자 추가 희망 조건(user_preference)과 제목/설명/지원내용이 맞는 것\n"
+        "4) 비슷한 정책만 고르지 말고 성격이 다른 5개로 분산(예: 세금/금융/취업/주거 등)\n"
+        f"사용자 intent: {intent or '없음'}\n"
+        "제약:\n"
+        f"- intent가 있으면, 선택 {k}개 중 최소 3개는 policy_type이 intent와 같아야 한다(가능한 경우).\n"
+        "- 후보에 없는 id 금지, 중복 금지.\n"
+        f"반드시 순수 JSON 배열만 반환: 정수 id {k}개."
+    )
 
     user_info = {
         "age": int(user_profile.get("age", 0)),
@@ -341,91 +569,102 @@ def select_policy_ids_with_llm(cfg: AppConfig, candidates: List[Dict[str, Any]],
         "special": user_profile.get("special", []),
         "income": int(user_profile.get("income", 0)),
         "interest_keywords": user_profile.get("interest_keywords", []),
+        "intent": intent,
     }
+
     payload = json.dumps(candidates, ensure_ascii=False)
     prompt = (
         f"사용자 정보: {json.dumps(user_info, ensure_ascii=False)}\n"
-        f"추가 희망 조건: {user_preference}\n"
-        f"아래 데이터에서 사용자에게 가장 적합한 정책 {k}개의 id만 골라라.\n"
+        f"추가 희망 조건(user_preference): {user_preference}\n"
+        f"아래 후보 데이터에서 가장 적합한 정책 {k}개를 고르고, id 배열만 출력하라.\n"
         f"{payload}"
     )
 
-    llm = new_llm(cfg, temperature=0.2, max_tokens=100)
+    llm = new_llm(cfg, temperature=0.2, max_tokens=120)
+    valid_ids = {int(s["id"]) for s in candidates}
 
     last_exc: Optional[Exception] = None
     for attempt in range(cfg.llm_retries + 1):
         try:
             resp = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=prompt)])
-            txt = resp.content.strip()
+            txt = (resp.content or "").strip()
             txt = re.sub(r"^```(?:json)?\n?|```$", "", txt).strip()
+
             arr = json.loads(txt)
-            ids = []
+            ids: List[int] = []
             for x in arr:
                 if isinstance(x, int):
                     ids.append(x)
                 elif isinstance(x, str) and x.isdigit():
                     ids.append(int(x))
-            # 유효성: 후보 목록에 존재하는 id만 허용
-            valid_ids = {int(s["id"]) for s in candidates}
-            ids = [i for i in ids if i in valid_ids]
-            if not ids:
+
+            out: List[int] = []
+            seen = set()
+            for i in ids:
+                if i in valid_ids and i not in seen:
+                    out.append(i)
+                    seen.add(i)
+                if len(out) >= k:
+                    break
+
+            if not out:
                 raise ValueError("빈 ID 목록")
-            return ids[:k]
+            return out
+
         except Exception as e:
             last_exc = e
-            wait = 0.5 * (attempt + 1)
+            wait = 0.6 * (attempt + 1)
             logger.warning("select_policy_ids_with_llm 실패(%d): %s -> %.1fs 재시도", attempt + 1, e, wait)
             time.sleep(wait)
 
     logger.error("select_policy_ids_with_llm 최종 실패: %s", last_exc)
     return []
 
-def generate_llm_reasons(cfg: AppConfig, policies: List[Dict[str, Any]],
-                         user: Dict[str, Any], user_intent: str) -> List[Dict[str, Any]]:
-    """
-    선택된 정책들에 대해 간결한 추천 문구를 LLM으로 생성.
-    - 청크 처리 + Pydantic 유효성 검증
-    - 실패 시 조용히 스킵(로컬 fallback 존재)
-    """
+def generate_llm_reasons(
+    cfg: AppConfig,
+    policies: List[Dict[str, Any]],
+    user: Dict[str, Any],
+    user_intent: str
+) -> List[Dict[str, Any]]:
     if not policies:
         return policies
 
     llm = new_llm(cfg, temperature=0.3, max_tokens=cfg.reason_max_tokens)
     sys_prompt = (
-        "역할: 한국 청년정책 추천 에디터. 사실만 사용해 간결하고 설득력 있는 한국어 문장을 작성.\n"
-        "반드시 JSON 배열만 반환하라. 배열 요소는 {\"id\": number, \"reason\": string} 형식이어야 한다.\n"
-        "reason은 60~110자 내외, 상투어·과장 금지, 각 정책마다 **차별화 포인트** 1~2개 포함."
+        "역할: 한국 청년정책 추천 에디터. 데이터에 있는 사실만 사용.\n"
+        "반드시 JSON 배열만 반환. 각 요소는 {\"id\": number, \"reason\": string}.\n"
+        "reason은 60~110자. 상투어/과장 금지. 사용자 조건(지역/키워드/연령/지원내용) 중 최소 2개를 근거로 써라."
     )
 
-    # 요약 목록(토큰 절약)
     summaries = [summarize_for_llm(p, user) for p in policies]
 
     for i in range(0, len(summaries), cfg.reason_chunk_size):
-        chunk = summaries[i : i + cfg.reason_chunk_size]
+        chunk = summaries[i:i + cfg.reason_chunk_size]
         payload = json.dumps(chunk, ensure_ascii=False)
+
         user_prompt = (
             f"사용자 의도: {user_intent}\n"
-            f"데이터: {payload}\n\n"
-            "위 데이터에 대해 JSON 배열로 각각 {\"id\": id, \"reason\": \"간단한 추천 문구\"} 형식으로 응답하라."
+            f"데이터: {payload}\n"
+            "각 정책에 대해 추천 이유를 JSON 배열로 작성하라."
         )
 
         last_exc: Optional[Exception] = None
         for attempt in range(cfg.llm_retries + 1):
             try:
-                resp = llm([SystemMessage(content=sys_prompt), HumanMessage(content=user_prompt)])
-                txt = resp.content.strip()
+                resp = llm.invoke([SystemMessage(content=sys_prompt), HumanMessage(content=user_prompt)])
+                txt = (resp.content or "").strip()
                 txt = re.sub(r"^```(?:json)?\n?|```$", "", txt).strip()
+
                 arr = json.loads(txt)
-                validated: List[ReasonItemModel] = []
-                for obj in arr:
-                    validated.append(ReasonItemModel(**obj))
-                # 매핑
+                validated: List[ReasonItemModel] = [ReasonItemModel(**obj) for obj in arr]
+
                 rid2reason = {ri.id: ri.reason for ri in validated}
                 for p in policies:
                     pid = int(p.get("id") or -1)
                     if pid in rid2reason:
-                        p["reason"] = rid2reason[pid]
+                        p["reason_llm"] = rid2reason[pid]
                 break
+
             except (json.JSONDecodeError, ValidationError, ValueError) as ve:
                 last_exc = ve
                 time.sleep(0.7 * (attempt + 1))
@@ -434,6 +673,7 @@ def generate_llm_reasons(cfg: AppConfig, policies: List[Dict[str, Any]],
                 last_exc = e
                 time.sleep(0.7 * (attempt + 1))
                 continue
+
         if last_exc:
             logger.warning("generate_llm_reasons chunk 실패 (i=%d): %s", i, last_exc)
 
@@ -448,55 +688,42 @@ def build_reason_and_badges(policy: Dict[str, Any], user: Dict[str, Any]) -> Tup
 
     kw = _intersect(policy.get("plcyKywdNm", []), user.get("interest_keywords", []))
     if kw:
-        parts.append(f"관심 키워드({', '.join(kw[:2])})와 일치")
         badges.append(f"관심:{kw[0]}")
+        parts.append(f"관심 키워드({', '.join(kw[:2])})와 연관")
+
+    rs = region_match_strength(policy.get("zipCd", []), user.get("region", []))
+    if rs in ("exact", "partial"):
+        hint = normalize_policy_region_list(policy.get("zipCd", []))[:1]
+        if hint:
+            badges.append(f"지역:{hint[0]}")
+        parts.append("거주/신청 지역 조건이 맞는 편")
+
+    if policy.get("sprtTrgtAgeLmtYn") != "N":
+        parts.append(f"연령 {policy.get('sprtTrgtMinAge',0)}~{policy.get('sprtTrgtMaxAge',0)}세 대상")
 
     method = (policy.get("plcyPvsnMthdCd") or "").strip()
     if method:
         badges.append(method)
 
-    # 추가 차별화: 지역 일치 / 연령 범위 명시
-    if _intersect(policy.get("zipCd", []), user.get("region", [])):
-        parts.append("거주지역 조건 부합")
-    if policy.get("sprtTrgtAgeLmtYn") != "N":
-        parts.append(f"연령 {policy.get('sprtTrgtMinAge',0)}~{policy.get('sprtTrgtMaxAge',0)}세 대상")
-
-    reason = " / ".join(parts[:3]) if parts else "사용자 조건과 부합"
+    reason = " / ".join(parts[:3]) if parts else "사용자 조건과 전반적으로 무난하게 맞는 정책"
     return reason, badges[:3]
-
-# --------------------------
-# 이름기반 Fallback(선택)
-# --------------------------
-def find_policies_by_name(policies: List[Dict[str, Any]], name_list: List[str], cutoff=0.85) -> List[Dict[str, Any]]:
-    results = []
-    for name in name_list:
-        best = None
-        best_score = -1.0
-        for p in policies:
-            s = difflib.SequenceMatcher(None, (p.get("plcyNm") or "").strip(), name).ratio()
-            if s > best_score:
-                best, best_score = p, s
-        if best and best_score >= cutoff:
-            results.append(best)
-        else:
-            logger.warning("이름 Fallback 실패: %s", name)
-    return results
 
 # --------------------------
 # 메인 파이프라인
 # --------------------------
 def main(argv: List[str]) -> int:
     if len(argv) < 3:
-        print("사용법: python3 langchaintest.py <user_id(email)> \"<user_preference>\"")
+        print('사용법: python3 recommend.py <user_id(email)> "<user_preference>"')
         return 1
+
     user_id = argv[1]
     user_preference = argv[2].strip()
+    intent = detect_intent(user_preference)
 
     if not CFG.openai_api_key:
         logger.error("OPENAI_API_KEY가 없습니다.")
         return 2
 
-    # 입력/데이터
     user_profile = load_user_from_db(CFG, user_id)
     policies = load_policies_from_db(CFG)
     filtered = filter_policies(policies, user_profile)
@@ -505,48 +732,39 @@ def main(argv: List[str]) -> int:
         print(json.dumps([], ensure_ascii=False, indent=2))
         return 0
 
-    # 재현성 있는 셔플 시드: user_id + 오늘(UTC)
     today_key = datetime.now(timezone.utc).strftime("%Y%m%d")
-    stable_seed = abs(hash((user_id, today_key))) & 0x7FFFFFFF
+    seed = stable_seed_int(user_id, today_key)
 
-    # 후보 생성(바이어스 줄이기)
-    candidates = build_candidate_view(
-        filtered, user_profile, user_preference, CFG.top_n_view, stable_seed
-    )
+    candidates = build_candidate_view(filtered, user_profile, user_preference, CFG.top_n_view, seed)
 
-    # ID 선택 (핵심 개선)
-    selected_ids = select_policy_ids_with_llm(
-        CFG, candidates, user_profile, user_preference, k=CFG.select_k
-    )
+    selected_ids = select_policy_ids_with_llm(CFG, candidates, user_profile, user_preference, k=CFG.select_k)
 
-    # LLM이 비정상 응답했을 때의 **최후의 보루**:
-    # - 후보 상위 K개를 스코어 순으로 대체 선택
     if not selected_ids:
-        logger.warning("LLM ID 선택 실패 → 프리스코어 상위 K로 대체")
+        logger.warning("LLM ID 선택 실패 → 로컬 스코어 상위 K로 대체")
         pref_tokens = _tokenize_korean(user_preference)
         candidates_sorted = sorted(
-            candidates, key=lambda s: pre_score(s, pref_tokens), reverse=True
+            candidates, key=lambda s: pre_score(s, pref_tokens, intent), reverse=True
         )
         selected_ids = [int(s["id"]) for s in candidates_sorted[:CFG.select_k]]
 
     id_to_policy = {int(p.get("id") or -1): p for p in filtered}
     details = [id_to_policy[i] for i in selected_ids if i in id_to_policy]
 
-    # 로컬 기본 이유/배지
     for p in details:
         r, b = build_reason_and_badges(p, user_profile)
-        p["reason"], p["badges"] = r, b
+        p["reason"] = r
+        p["badges"] = b
 
-    # LLM 정교화 이유(옵션)
     details = generate_llm_reasons(CFG, details, user_profile, user_preference)
 
-    # 최종 출력(JSON)
+    for p in details:
+        if p.get("reason_llm"):
+            p["reason"] = p["reason_llm"]
+            del p["reason_llm"]
+
     print(json.dumps(details, ensure_ascii=False, indent=2))
     return 0
 
-# --------------------------
-# Entry
-# --------------------------
 if __name__ == "__main__":
     try:
         sys.exit(main(sys.argv))
@@ -556,4 +774,3 @@ if __name__ == "__main__":
     except Exception as e:
         logger.exception("치명적 오류: %s", e)
         sys.exit(99)
-
