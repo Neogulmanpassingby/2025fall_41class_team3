@@ -1,4 +1,5 @@
 require('dotenv').config();
+
 const axios = require('axios');
 const mysql = require('mysql2/promise');
 const fs = require('fs');
@@ -9,9 +10,8 @@ const API_KEY = process.env.API_KEY;
 const BASE_URL = process.env.BASE_URL;
 const PAGE_SIZE = 1000;
 
-// zipCd 변환 로딩 (legal_district_code.txt 필요)
 const zipCdToName = {};
-const filePath = path.join(__dirname, 'legal_district_code.txt');
+const filePath = path.join(__dirname, '../data/legal_district_code.txt');
 async function loadZipCdToName() {
   return new Promise((resolve, reject) => {
     const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
