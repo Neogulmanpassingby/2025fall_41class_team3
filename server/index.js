@@ -1,6 +1,5 @@
 const express = require('express');
 const cors = require('cors');
-const swaggerUi = require('swagger-ui-express');
 const swaggerSpec = require('./config/swagger');
 
 const authRouter = require('./routes/auth');
@@ -35,18 +34,11 @@ app.use((req, res, next) => {
   next();
 });
 
-// Swagger 문서 제공
-app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
-  swaggerOptions: {
-    url: '/swagger.json'
-  }
-}));
-
-// Swagger JSON 제공
-app.get('/swagger.json', (req, res) => {
-  res.setHeader('Content-Type', 'application/json');
-  res.send(swaggerSpec);
+app.get('/api-docs.json', (req, res) => {
+  res.json(swaggerSpec);
 });
+
+console.log(`Swagger JSON: http://localhost:${PORT}/api-docs.json`);
 
 app.use('/api/auth', authRouter);
 app.use('/api/policies', policyRouter);
